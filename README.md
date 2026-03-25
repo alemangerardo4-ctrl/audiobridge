@@ -7,7 +7,7 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 - **System Audio Capture** - Record from browser, Spotify, YouTube, any app
 - **Virtual Audio Devices** - 2ch, 16ch, and 24ch routing
 - **Zero Latency** - Direct CoreAudio passthrough
-- **Menu Bar Control** - Simple toggle for recording
+- **Menu Bar Control** - Simple toggle and quick profiles
 
 ## Installation
 
@@ -19,12 +19,37 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 4. Restart your Mac
 5. AudioBridge appears in menu bar
 
+## Menu Bar App
+
+The AudioBridge menu bar app (`AudioBridgeApp/`) provides:
+
+- **Enable AudioBridge toggle** — detects the HAL driver via CoreAudio
+- **Quick Profiles** — one-click input routing for common workflows:
+  - Podcast Recording → AudioBridge 2ch
+  - Music Production → AudioBridge 16ch
+  - Streaming → AudioBridge 2ch
+  - Screen Recording → AudioBridge 2ch
+- **Open Audio MIDI Setup** — shortcut to Apple's routing utility
+- **About / Quit**
+
+No dock icon (`LSUIElement = true`). Lives entirely in the menu bar.
+
+### Building the Menu Bar App
+
+Requires Xcode Command Line Tools and macOS 13+.
+
+```bash
+swift build -c release
+```
+
+Or open in Xcode via `Package.swift`.
+
 ## Usage
 
 ### Basic Recording
 
 1. Click AudioBridge icon in menu bar
-2. Click "Start Recording"
+2. Select a **Quick Profile** or manually set input in your DAW
 3. Open your DAW (Logic, Ableton, Pro Tools, etc.)
 4. Select **"AudioBridge 2ch"** as input device
 5. System audio now routes to your DAW
@@ -42,14 +67,14 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 
 ## Use Cases
 
-- **Sample System Audio** - Capture sounds from any app
-- **Record Streams** - Archive Spotify, YouTube, podcasts
-- **Audio Hijacking** - Route app audio into your DAW
-- **Live Looping** - Capture and process in real-time
+- **Podcast Recording** — route Discord/Zoom audio into your DAW
+- **Music Production** — send audio between DAWs and plugins
+- **Streaming** — combine mic + desktop audio into OBS
+- **Screen Recording** — capture system audio in QuickTime
 
 ## System Requirements
 
-- **macOS:** 11.0 (Big Sur) or later
+- **macOS:** 11.0 (Big Sur) or later (menu bar app requires 13+)
 - **Architecture:** Intel & Apple Silicon (Universal)
 - **DAW:** Any CoreAudio-compatible app
 - **Size:** 96 KB (installer)
@@ -59,7 +84,7 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 - Built with Swift + CoreAudio
 - Virtual audio driver using Audio Server Plugin
 - Zero CPU overhead (hardware passthrough)
-- Signed and notarized for macOS
+- Menu bar app uses `NSStatusItem` + CoreAudio device enumeration
 
 ## Troubleshooting
 
@@ -69,21 +94,19 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 - Verify audio extension is approved
 
 **No audio routing?**
-- Click menu bar icon to toggle recording ON
-- Verify "Audio Bridge 2ch" selected in DAW input
-- Check Audio MIDI Setup app (search in Spotlight)
+- Verify "AudioBridge 2ch" is selected in DAW input
+- Check Audio MIDI Setup app (menu bar → Open Audio MIDI Setup)
 
 ## Version
 
-**Current:** 1.0.0  
+**Current:** 1.0.0
 **Released:** March 2026
 
 ## License
 
-Open source - MIT License
+Based on BlackHole by [Existential Audio Inc.](https://existential.audio/) — GPL-3.0.
+See [ATTRIBUTION.md](ATTRIBUTION.md) for details.
 
 ---
 
 **Part of [PUBLIC WORKS](https://publicworks.design) - Open source audio tools for creators.**
-
-**Download:** [AudioBridge-1.0.0.pkg](https://publicworks.design/downloads/AudioBridge-1.0.0.pkg) (96 KB)
