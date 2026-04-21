@@ -13,6 +13,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("Cocoa"),
+                .linkedFramework("UserNotifications"),
             ]
         )
     ]
