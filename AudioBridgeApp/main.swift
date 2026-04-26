@@ -224,49 +224,37 @@ func postNotification(title: String, body: String) {
 
 // MARK: - Menu bar icon
 
-// A custom template icon: a stylized speaker fanning into two output paths,
-// suggesting routing rather than just playback. Two visual states reflect
-// driver detection: filled (active) vs. outlined (idle).
+// Stepped square spiral, monochrome template — same shape as the
+// publicworks.design favicon and the app icon. Stroke thickens slightly when
+// the driver is active so the menu bar reflects state at a glance.
 func makeMenuBarIcon(active: Bool) -> NSImage {
     let size = NSSize(width: 18, height: 18)
-    let image = NSImage(size: size, flipped: false) { rect in
-        let lineWidth: CGFloat = active ? 1.6 : 1.3
+    let image = NSImage(size: size, flipped: false) { _ in
+        // 16-unit spiral coords (top-left origin) → AppKit (bottom-left), inset
+        // a bit so strokes don't touch the menu bar edge.
+        let inset: CGFloat = 1.5
+        let drawSize = size.width - inset * 2
+        let scale = drawSize / 16.0
+        func pt(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+            NSPoint(x: inset + x * scale, y: size.height - inset - y * scale)
+        }
+
+        let path = NSBezierPath()
+        path.move(to: pt(4, 4))
+        path.line(to: pt(12, 4))
+        path.line(to: pt(12, 12))
+        path.line(to: pt(6, 12))
+        path.line(to: pt(6, 6))
+        path.line(to: pt(10, 6))
+        path.line(to: pt(10, 10))
+        path.line(to: pt(8, 10))
+        path.line(to: pt(8, 8))
+        path.lineWidth    = active ? 1.6 : 1.2
+        path.lineCapStyle = .square
+        path.lineJoinStyle = .miter
+
         NSColor.black.set()
-
-        // Speaker body (left)
-        let body = NSBezierPath()
-        body.move(to: NSPoint(x: 2, y: 6.5))
-        body.line(to: NSPoint(x: 5, y: 6.5))
-        body.line(to: NSPoint(x: 8.5, y: 3))
-        body.line(to: NSPoint(x: 8.5, y: 15))
-        body.line(to: NSPoint(x: 5, y: 11.5))
-        body.line(to: NSPoint(x: 2, y: 11.5))
-        body.close()
-        if active { body.fill() } else {
-            body.lineWidth = lineWidth
-            body.stroke()
-        }
-
-        // Two routing arcs to the right (waves splitting into two paths)
-        let arc1 = NSBezierPath()
-        arc1.lineWidth = lineWidth
-        arc1.lineCapStyle = .round
-        arc1.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 4,
-                       startAngle: -35, endAngle: 35)
-        arc1.stroke()
-
-        let arc2 = NSBezierPath()
-        arc2.lineWidth = lineWidth
-        arc2.lineCapStyle = .round
-        arc2.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 6.5,
-                       startAngle: -28, endAngle: 28)
-        arc2.stroke()
-
-        // Small dot to mark the "bridge" — split point
-        if active {
-            let dot = NSBezierPath(ovalIn: NSRect(x: 14.5, y: 8, width: 2, height: 2))
-            dot.fill()
-        }
+        path.stroke()
         return true
     }
     image.isTemplate = true
@@ -559,10 +547,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showAbout() {
+        let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
         let alert = NSAlert()
         alert.messageText     = "AudioBridge"
         alert.informativeText = """
-        Version 2.2.0
+        Version \(version)
         Virtual audio routing for macOS.
 
         Driver bundle ID: \(kAudioBridgeBundleID)

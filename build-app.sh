@@ -23,7 +23,7 @@ cd "$HERE"
 DEV_ID="Developer ID Application: GERARDO ALEMAN (D52UXTRNZA)"
 APP="AudioBridge.app"
 BIN="AudioBridgeApp"
-VERSION="2.2.0"
+VERSION="2.2.2"
 
 # Read version from Info.plist if available, falling back to the constant above.
 if PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AudioBridgeApp/Info.plist 2>/dev/null)"; then
@@ -52,6 +52,10 @@ lipo -create -output "$STAGE/$APP/Contents/MacOS/$BIN" \
   .build/arm64/$BIN .build/x86_64/$BIN
 
 cp AudioBridgeApp/Info.plist "$STAGE/$APP/Contents/Info.plist"
+
+if [ -f AudioBridgeApp/Resources/AppIcon.icns ]; then
+  cp AudioBridgeApp/Resources/AppIcon.icns "$STAGE/$APP/Contents/Resources/AppIcon.icns"
+fi
 
 xattr -cr "$STAGE/$APP"
 codesign --force --options runtime --timestamp --sign "$DEV_ID" "$STAGE/$APP"
