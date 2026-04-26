@@ -5,3 +5,5 @@ Driver/build-artifacts/
 dist/*.pkg
 dist/*.zip
 .DS_Store
+AudioBridgeApp/Resources/AppIcon.iconset/
+AudioBridgeApp/Resources/AppIcon-1024.png

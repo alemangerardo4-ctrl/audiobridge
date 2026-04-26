@@ -11,9 +11,10 @@
 # into a zip in dist/. We never leave a signed .app at the worktree root.
 #
 # After signing, notarize separately if you need Gatekeeper acceptance:
-#   xcrun notarytool submit dist/AudioBridge-2.2.0.zip --keychain-profile <profile> --wait
-#   ditto -xk dist/AudioBridge-2.2.0.zip /tmp/staple
+#   xcrun notarytool submit dist/AudioBridge-2.2.1.zip --keychain-profile AC_PASSWORD --wait
+#   ditto -xk dist/AudioBridge-2.2.1.zip /tmp/staple
 #   xcrun stapler staple /tmp/staple/AudioBridge.app
+#   ditto -ck --norsrc --noextattr --noacl --keepParent /tmp/staple/AudioBridge.app dist/AudioBridge-2.2.1.zip
 
 set -euo pipefail
 
@@ -23,7 +24,7 @@ cd "$HERE"
 DEV_ID="Developer ID Application: GERARDO ALEMAN (D52UXTRNZA)"
 APP="AudioBridge.app"
 BIN="AudioBridgeApp"
-VERSION="2.2.0"
+VERSION="2.2.1"
 
 # Read version from Info.plist if available, falling back to the constant above.
 if PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AudioBridgeApp/Info.plist 2>/dev/null)"; then
@@ -52,6 +53,14 @@ lipo -create -output "$STAGE/$APP/Contents/MacOS/$BIN" \
   .build/arm64/$BIN .build/x86_64/$BIN
 
 cp AudioBridgeApp/Info.plist "$STAGE/$APP/Contents/Info.plist"
+
+# Bundle the AppIcon so Finder/Dock/About-this-app pick it up. Regenerate it
+# from the Python source if the .icns isn't already present so a clean build
+# doesn't ship without an icon.
+if [ ! -f AudioBridgeApp/Resources/AppIcon.icns ]; then
+  python3 AudioBridgeApp/Resources/make_icon.py >/dev/null
+fi
+cp AudioBridgeApp/Resources/AppIcon.icns "$STAGE/$APP/Contents/Resources/AppIcon.icns"
 
 xattr -cr "$STAGE/$APP"
 codesign --force --options runtime --timestamp --sign "$DEV_ID" "$STAGE/$APP"

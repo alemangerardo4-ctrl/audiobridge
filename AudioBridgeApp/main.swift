@@ -224,49 +224,74 @@ func postNotification(title: String, body: String) {
 
 // MARK: - Menu bar icon
 
-// A custom template icon: a stylized speaker fanning into two output paths,
-// suggesting routing rather than just playback. Two visual states reflect
-// driver detection: filled (active) vs. outlined (idle).
+// Template icon: stylized suspension bridge (Public Works "Bridge" mark).
+// Two pylons, two suspension cables, a deck spanning the full width, and
+// a small connector dot at each pylon/deck intersection. Same geometry as
+// the app icon so the menu bar reads as the same product.
+//
+// Two states:
+//   - active (driver detected): filled connector dots, slightly heavier deck
+//   - idle  (driver missing):   no connector dots, lighter strokes
+//
+// All strokes are template-black; macOS tints to match menu bar appearance.
 func makeMenuBarIcon(active: Bool) -> NSImage {
     let size = NSSize(width: 18, height: 18)
-    let image = NSImage(size: size, flipped: false) { rect in
-        let lineWidth: CGFloat = active ? 1.6 : 1.3
+    let image = NSImage(size: size, flipped: false) { _ in
         NSColor.black.set()
 
-        // Speaker body (left)
-        let body = NSBezierPath()
-        body.move(to: NSPoint(x: 2, y: 6.5))
-        body.line(to: NSPoint(x: 5, y: 6.5))
-        body.line(to: NSPoint(x: 8.5, y: 3))
-        body.line(to: NSPoint(x: 8.5, y: 15))
-        body.line(to: NSPoint(x: 5, y: 11.5))
-        body.line(to: NSPoint(x: 2, y: 11.5))
-        body.close()
-        if active { body.fill() } else {
-            body.lineWidth = lineWidth
-            body.stroke()
+        let stroke: CGFloat   = active ? 1.4 : 1.2
+        let deckStroke: CGFloat = active ? 1.7 : 1.4
+        let cableStroke: CGFloat = 1.0
+
+        func line(_ p1: NSPoint, _ p2: NSPoint, _ width: CGFloat) {
+            let path = NSBezierPath()
+            path.lineWidth = width
+            path.lineCapStyle = .round
+            path.move(to: p1)
+            path.line(to: p2)
+            path.stroke()
         }
 
-        // Two routing arcs to the right (waves splitting into two paths)
-        let arc1 = NSBezierPath()
-        arc1.lineWidth = lineWidth
-        arc1.lineCapStyle = .round
-        arc1.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 4,
-                       startAngle: -35, endAngle: 35)
-        arc1.stroke()
+        // 18x18 grid. Bridge spans 2..16 horizontally, top cable at y=14,
+        // deck at y=7, pylons go from y=14 down to y=3.
+        let leftPylonX:  CGFloat = 6
+        let rightPylonX: CGFloat = 12
+        let topY:        CGFloat = 14
+        let bottomY:     CGFloat = 3
+        let deckY:       CGFloat = 7
+        let deckLeft:    CGFloat = 2
+        let deckRight:   CGFloat = 16
 
-        let arc2 = NSBezierPath()
-        arc2.lineWidth = lineWidth
-        arc2.lineCapStyle = .round
-        arc2.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 6.5,
-                       startAngle: -28, endAngle: 28)
-        arc2.stroke()
+        // Suspension cables (drawn first, sit underneath).
+        line(NSPoint(x: leftPylonX,  y: topY),
+             NSPoint(x: deckLeft,    y: deckY), cableStroke)
+        line(NSPoint(x: rightPylonX, y: topY),
+             NSPoint(x: deckRight,   y: deckY), cableStroke)
 
-        // Small dot to mark the "bridge" — split point
+        // Top cable connecting the pylons.
+        line(NSPoint(x: leftPylonX,  y: topY),
+             NSPoint(x: rightPylonX, y: topY), stroke)
+
+        // Pylons.
+        line(NSPoint(x: leftPylonX,  y: topY),
+             NSPoint(x: leftPylonX,  y: bottomY), stroke)
+        line(NSPoint(x: rightPylonX, y: topY),
+             NSPoint(x: rightPylonX, y: bottomY), stroke)
+
+        // Deck (heaviest line).
+        line(NSPoint(x: deckLeft,    y: deckY),
+             NSPoint(x: deckRight,   y: deckY), deckStroke)
+
+        // Connector dots at the pylon/deck intersections — only shown when
+        // the driver is detected, so the menu bar gives an at-a-glance state.
         if active {
-            let dot = NSBezierPath(ovalIn: NSRect(x: 14.5, y: 8, width: 2, height: 2))
-            dot.fill()
+            let r: CGFloat = 1.5
+            for cx in [leftPylonX, rightPylonX] {
+                NSBezierPath(ovalIn: NSRect(x: cx - r, y: deckY - r,
+                                            width: 2 * r, height: 2 * r)).fill()
+            }
         }
+
         return true
     }
     image.isTemplate = true
@@ -562,7 +587,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText     = "AudioBridge"
         alert.informativeText = """
-        Version 2.2.0
+        Version 2.2.1
         Virtual audio routing for macOS.
 
         Driver bundle ID: \(kAudioBridgeBundleID)
