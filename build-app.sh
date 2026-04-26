@@ -23,7 +23,7 @@ cd "$HERE"
 DEV_ID="Developer ID Application: GERARDO ALEMAN (D52UXTRNZA)"
 APP="AudioBridge.app"
 BIN="AudioBridgeApp"
-VERSION="2.2.2"
+VERSION="2.2.3"
 
 # Read version from Info.plist if available, falling back to the constant above.
 if PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AudioBridgeApp/Info.plist 2>/dev/null)"; then

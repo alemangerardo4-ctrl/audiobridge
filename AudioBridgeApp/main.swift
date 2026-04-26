@@ -225,32 +225,33 @@ func postNotification(title: String, body: String) {
 // MARK: - Menu bar icon
 
 // Stepped square spiral, monochrome template — same shape as the
-// publicworks.design favicon and the app icon. Stroke thickens slightly when
-// the driver is active so the menu bar reflects state at a glance.
+// publicworks.design favicon and the app icon. Path is normalized to an
+// 8-unit space (the favicon's spiral only occupies the 4..12 sub-region
+// of its 16-unit viewBox; renormalizing lets the mark fill the menu bar
+// height with a small margin instead of floating in the middle).
 func makeMenuBarIcon(active: Bool) -> NSImage {
     let size = NSSize(width: 18, height: 18)
     let image = NSImage(size: size, flipped: false) { _ in
-        // 16-unit spiral coords (top-left origin) → AppKit (bottom-left), inset
-        // a bit so strokes don't touch the menu bar edge.
-        let inset: CGFloat = 1.5
-        let drawSize = size.width - inset * 2
-        let scale = drawSize / 16.0
+        let strokeUnits: CGFloat = active ? 0.7 : 0.6
+        // Reserve room for square stroke caps (extend half-stroke past the
+        // path endpoints) so the spiral hugs the bounds without clipping.
+        let span = size.width - 2.0
+        let scale = span / (8 + strokeUnits)
+        let inset = (size.width - 8 * scale) / 2
+
+        let p: [(CGFloat, CGFloat)] = [
+            (0, 0), (8, 0), (8, 8), (2, 8), (2, 2),
+            (6, 2), (6, 6), (4, 6), (4, 4),
+        ]
         func pt(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
             NSPoint(x: inset + x * scale, y: size.height - inset - y * scale)
         }
 
         let path = NSBezierPath()
-        path.move(to: pt(4, 4))
-        path.line(to: pt(12, 4))
-        path.line(to: pt(12, 12))
-        path.line(to: pt(6, 12))
-        path.line(to: pt(6, 6))
-        path.line(to: pt(10, 6))
-        path.line(to: pt(10, 10))
-        path.line(to: pt(8, 10))
-        path.line(to: pt(8, 8))
-        path.lineWidth    = active ? 1.6 : 1.2
-        path.lineCapStyle = .square
+        path.move(to: pt(p[0].0, p[0].1))
+        for q in p.dropFirst() { path.line(to: pt(q.0, q.1)) }
+        path.lineWidth     = strokeUnits * scale
+        path.lineCapStyle  = .square
         path.lineJoinStyle = .miter
 
         NSColor.black.set()
