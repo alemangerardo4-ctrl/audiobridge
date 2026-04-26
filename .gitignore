@@ -1,0 +1,7 @@
+.build/
+.driver-build/
+AudioBridge.app/
+Driver/build-artifacts/
+dist/*.pkg
+dist/*.zip
+.DS_Store

@@ -11,25 +11,26 @@ Menu bar app for seamless audio routing on macOS. Record system audio, create vi
 
 ## Installation
 
-1. Download `AudioBridge-1.0.0.pkg` from [Releases](../../releases) **(96 KB)**
-2. Double-click to install
-3. Grant Audio Extension permissions:
-   - System Settings → Privacy & Security
-   - Approve "AudioBridge" extension
-4. Restart your Mac
-5. AudioBridge appears in menu bar
+1. Install the driver: open `dist/AudioBridge-Driver-2.2.0-signed.pkg` and follow the prompts
+2. Restart your Mac (HAL plugins are loaded at coreaudiod startup; the postinstall kicks coreaudiod but a reboot is the reliable path)
+3. Run the menu bar app: extract `dist/AudioBridge-2.2.0.zip` and move `AudioBridge.app` to `/Applications`
+
+The driver installs to `/Library/Audio/Plug-Ins/HAL/AudioBridge.driver` (bundle ID `design.publicworks.AudioBridge`).
 
 ## Menu Bar App
 
 The AudioBridge menu bar app (`AudioBridgeApp/`) provides:
 
-- **Enable AudioBridge toggle** — detects the HAL driver via CoreAudio
+- **Driver detection** — checks for the HAL driver by device UID (`AudioBridge2ch_UID`, etc.) and live-updates when the driver appears or disappears
 - **Quick Profiles** — one-click input routing for common workflows:
   - Podcast Recording → AudioBridge 2ch
   - Music Production → AudioBridge 16ch
   - Streaming → AudioBridge 2ch
   - Screen Recording → AudioBridge 2ch
+- **Voice + System Audio** — toggles a CoreAudio aggregate input that combines the current default mic with AudioBridge 2ch and sets it as default input. DAWs see one device with mic + system-audio channels side-by-side
+- **Monitor + Record** — toggles a multi-output aggregate (current speakers + AudioBridge) so you keep listening while a DAW records system audio
 - **Open Audio MIDI Setup** — shortcut to Apple's routing utility
+- **Install Driver…** — opens the bundled `.pkg`
 - **About / Quit**
 
 No dock icon (`LSUIElement = true`). Lives entirely in the menu bar.
@@ -39,10 +40,20 @@ No dock icon (`LSUIElement = true`). Lives entirely in the menu bar.
 Requires Xcode Command Line Tools and macOS 13+.
 
 ```bash
-swift build -c release
+./build-app.sh
 ```
 
-Or open in Xcode via `Package.swift`.
+Produces a signed universal (arm64 + x86_64) `dist/AudioBridge-<version>.zip`. The script stages the bundle in `/tmp` because the iCloud-synced repo path adds xattrs that codesign rejects.
+
+### Building the Driver
+
+The driver source is a fork of [BlackHole](https://github.com/ExistentialAudio/BlackHole) with branding patches in `Driver/audiobridge-branding.patch`. To rebuild from scratch:
+
+```bash
+./Driver/build.sh
+```
+
+See `Driver/README.md` for details.
 
 ## Usage
 
@@ -99,8 +110,8 @@ Or open in Xcode via `Package.swift`.
 
 ## Version
 
-**Current:** 1.0.0
-**Released:** March 2026
+**Current:** 2.2.0
+**Released:** April 2026
 
 ## License
 

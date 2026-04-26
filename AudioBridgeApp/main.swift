@@ -2,6 +2,17 @@ import Cocoa
 import CoreAudio
 import UserNotifications
 
+// MARK: - Driver constants
+
+// The AudioBridge driver (forked from BlackHole) exposes devices with these
+// UIDs and bundle ID. Detection by UID is more robust than by name match.
+let kAudioBridgeBundleID = "design.publicworks.AudioBridge"
+let kAudioBridgeUIDs: Set<String> = [
+    "AudioBridge2ch_UID",
+    "AudioBridge16ch_UID",
+    "AudioBridge24ch_UID",
+]
+
 // MARK: - CoreAudio Helpers
 
 func getAllDeviceIDs() -> [AudioDeviceID] {
@@ -46,35 +57,80 @@ func getDeviceUID(deviceID: AudioDeviceID) -> String? {
     return uid as String
 }
 
-func isAudioBridgeLoaded() -> Bool {
-    getAllDeviceIDs().contains {
-        getDeviceName(deviceID: $0)?.lowercased().contains("audiobridge") == true
-    }
+func deviceHasStreams(deviceID: AudioDeviceID, scope: AudioObjectPropertyScope) -> Bool {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreams,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var size: UInt32 = 0
+    let status = AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size)
+    return status == noErr && size > 0
 }
 
-func setDefaultInput(deviceName: String) {
+func isAudioBridgeDevice(deviceID: AudioDeviceID) -> Bool {
+    if let uid = getDeviceUID(deviceID: deviceID), kAudioBridgeUIDs.contains(uid) {
+        return true
+    }
+    // Fallback: name match (covers any future device variants the driver may add)
+    return getDeviceName(deviceID: deviceID)?.lowercased().hasPrefix("audiobridge") == true
+}
+
+func isAudioBridgeLoaded() -> Bool {
+    getAllDeviceIDs().contains(where: isAudioBridgeDevice)
+}
+
+func findAudioBridgeDeviceID(channelHint: Int? = nil) -> AudioDeviceID? {
+    let ids = getAllDeviceIDs()
+    if let channelHint {
+        let suffix = "\(channelHint)ch_UID"
+        for id in ids {
+            if let uid = getDeviceUID(deviceID: id), uid.hasPrefix("AudioBridge"), uid.hasSuffix(suffix) {
+                return id
+            }
+        }
+    }
+    return ids.first(where: isAudioBridgeDevice)
+}
+
+func setDefaultInput(deviceID: AudioDeviceID) {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var mutableID = deviceID
+    AudioObjectSetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+        UInt32(MemoryLayout<AudioDeviceID>.size), &mutableID
+    )
+}
+
+func setDefaultInputByName(_ deviceName: String) {
     for deviceID in getAllDeviceIDs() {
         guard let name = getDeviceName(deviceID: deviceID),
               name.lowercased().contains(deviceName.lowercased()) else { continue }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var mutableID = deviceID
-        AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size), &mutableID
-        )
+        setDefaultInput(deviceID: deviceID)
         return
     }
 }
 
-// MARK: - Monitor + Record Helpers
-
 func getDefaultOutputDeviceID() -> AudioDeviceID? {
     var address = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var deviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    let status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID)
+    guard status == noErr, deviceID != AudioDeviceID(kAudioObjectUnknown) else { return nil }
+    return deviceID
+}
+
+func getDefaultInputDeviceID() -> AudioDeviceID? {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
@@ -99,25 +155,17 @@ func setDefaultOutput(deviceID: AudioDeviceID) {
 }
 
 func findAudioBridgeOutputDeviceID() -> AudioDeviceID? {
-    for deviceID in getAllDeviceIDs() {
-        guard let name = getDeviceName(deviceID: deviceID),
-              name.lowercased().contains("audiobridge") else { continue }
-        // Confirm it exposes output streams
-        var streamAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
-            mScope: kAudioObjectPropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var streamSize: UInt32 = 0
-        let s = AudioObjectGetPropertyDataSize(deviceID, &streamAddr, 0, nil, &streamSize)
-        if s == noErr && streamSize > 0 {
+    for deviceID in getAllDeviceIDs() where isAudioBridgeDevice(deviceID: deviceID) {
+        if deviceHasStreams(deviceID: deviceID, scope: kAudioObjectPropertyScopeOutput) {
             return deviceID
         }
     }
     return nil
 }
 
-// Creates a Multi-Output (stacked aggregate) device that mirrors audio to both subdevices.
+// MARK: - Aggregate device helpers
+
+// Multi-Output (stacked) aggregate: master + AudioBridge — mirrors output to both.
 func createMonitorRecordAggregate(masterDeviceID: AudioDeviceID, bridgeDeviceID: AudioDeviceID) -> AudioDeviceID? {
     guard let masterUID = getDeviceUID(deviceID: masterDeviceID),
           let bridgeUID  = getDeviceUID(deviceID: bridgeDeviceID) else { return nil }
@@ -127,11 +175,34 @@ func createMonitorRecordAggregate(masterDeviceID: AudioDeviceID, bridgeDeviceID:
         [kAudioSubDeviceUIDKey as String: bridgeUID],
     ]
     let description: [String: Any] = [
-        kAudioAggregateDeviceNameKey          as String: "Monitor + Record",
-        kAudioAggregateDeviceUIDKey           as String: "com.audiobridge.monitorrecord",
-        kAudioAggregateDeviceSubDeviceListKey as String: subDevices,
+        kAudioAggregateDeviceNameKey            as String: "Monitor + Record",
+        kAudioAggregateDeviceUIDKey             as String: "design.publicworks.AudioBridge.monitorrecord",
+        kAudioAggregateDeviceSubDeviceListKey   as String: subDevices,
         kAudioAggregateDeviceMasterSubDeviceKey as String: masterUID,
-        kAudioAggregateDeviceIsStackedKey     as String: 1,  // Multi-Output: mirrors audio to all subdevices
+        kAudioAggregateDeviceIsStackedKey       as String: 1,
+    ]
+    var aggregateID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateID)
+    guard status == noErr, aggregateID != AudioDeviceID(kAudioObjectUnknown) else { return nil }
+    return aggregateID
+}
+
+// Aggregate input: microphone + AudioBridge 2ch — single device that exposes
+// mic channels and system-audio channels side-by-side. DAWs see one input.
+func createVoicePlusSystemAggregate(micDeviceID: AudioDeviceID, bridgeDeviceID: AudioDeviceID) -> AudioDeviceID? {
+    guard let micUID    = getDeviceUID(deviceID: micDeviceID),
+          let bridgeUID = getDeviceUID(deviceID: bridgeDeviceID) else { return nil }
+
+    let subDevices: [[String: Any]] = [
+        [kAudioSubDeviceUIDKey as String: micUID],
+        [kAudioSubDeviceUIDKey as String: bridgeUID],
+    ]
+    let description: [String: Any] = [
+        kAudioAggregateDeviceNameKey            as String: "Voice + System Audio",
+        kAudioAggregateDeviceUIDKey             as String: "design.publicworks.AudioBridge.voiceplussystem",
+        kAudioAggregateDeviceSubDeviceListKey   as String: subDevices,
+        kAudioAggregateDeviceMasterSubDeviceKey as String: micUID,
+        kAudioAggregateDeviceIsStackedKey       as String: 0,
     ]
     var aggregateID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
     let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateID)
@@ -151,6 +222,57 @@ func postNotification(title: String, body: String) {
     UNUserNotificationCenter.current().add(request)
 }
 
+// MARK: - Menu bar icon
+
+// A custom template icon: a stylized speaker fanning into two output paths,
+// suggesting routing rather than just playback. Two visual states reflect
+// driver detection: filled (active) vs. outlined (idle).
+func makeMenuBarIcon(active: Bool) -> NSImage {
+    let size = NSSize(width: 18, height: 18)
+    let image = NSImage(size: size, flipped: false) { rect in
+        let lineWidth: CGFloat = active ? 1.6 : 1.3
+        NSColor.black.set()
+
+        // Speaker body (left)
+        let body = NSBezierPath()
+        body.move(to: NSPoint(x: 2, y: 6.5))
+        body.line(to: NSPoint(x: 5, y: 6.5))
+        body.line(to: NSPoint(x: 8.5, y: 3))
+        body.line(to: NSPoint(x: 8.5, y: 15))
+        body.line(to: NSPoint(x: 5, y: 11.5))
+        body.line(to: NSPoint(x: 2, y: 11.5))
+        body.close()
+        if active { body.fill() } else {
+            body.lineWidth = lineWidth
+            body.stroke()
+        }
+
+        // Two routing arcs to the right (waves splitting into two paths)
+        let arc1 = NSBezierPath()
+        arc1.lineWidth = lineWidth
+        arc1.lineCapStyle = .round
+        arc1.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 4,
+                       startAngle: -35, endAngle: 35)
+        arc1.stroke()
+
+        let arc2 = NSBezierPath()
+        arc2.lineWidth = lineWidth
+        arc2.lineCapStyle = .round
+        arc2.appendArc(withCenter: NSPoint(x: 8.5, y: 9), radius: 6.5,
+                       startAngle: -28, endAngle: 28)
+        arc2.stroke()
+
+        // Small dot to mark the "bridge" — split point
+        if active {
+            let dot = NSBezierPath(ovalIn: NSRect(x: 14.5, y: 8, width: 2, height: 2))
+            dot.fill()
+        }
+        return true
+    }
+    image.isTemplate = true
+    return image
+}
+
 // MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -163,16 +285,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var monitorRecordAggregateID: AudioDeviceID? = nil
     var originalDefaultOutputID:  AudioDeviceID? = nil
 
+    // Voice + System Audio state
+    var voicePlusSystemActive       = false
+    var voicePlusSystemAggregateID: AudioDeviceID? = nil
+    var originalDefaultInputID:    AudioDeviceID? = nil
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         driverEnabled = isAudioBridgeLoaded()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "AudioBridge")
-            button.image?.isTemplate = true
+            button.image = makeMenuBarIcon(active: driverEnabled)
         }
         buildMenu()
+
+        // React to device list changes (driver install/uninstall, hot-plugged audio)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main
+        ) { [weak self] _, _ in
+            self?.refreshDriverState()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -182,6 +320,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             destroyAggregateDevice(deviceID: aggregateID)
         }
+        if voicePlusSystemActive, let aggregateID = voicePlusSystemAggregateID {
+            if let originalID = originalDefaultInputID {
+                setDefaultInput(deviceID: originalID)
+            }
+            destroyAggregateDevice(deviceID: aggregateID)
+        }
+    }
+
+    func refreshDriverState() {
+        driverEnabled = isAudioBridgeLoaded()
+        if let button = statusItem.button {
+            button.image = makeMenuBarIcon(active: driverEnabled)
+        }
+        buildMenu()
     }
 
     func buildMenu() {
@@ -194,6 +346,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         titleItem.isEnabled = false
         menu.addItem(titleItem)
+
+        let statusLabel = driverEnabled ? "Driver: detected" : "Driver: not installed"
+        let statusItemRow = NSMenuItem(title: statusLabel, action: nil, keyEquivalent: "")
+        statusItemRow.isEnabled = false
+        menu.addItem(statusItemRow)
         menu.addItem(.separator())
 
         let toggleItem = NSMenuItem(title: "Enable AudioBridge", action: #selector(toggleDriver(_:)), keyEquivalent: "")
@@ -222,6 +379,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         profilesMenu.addItem(.separator())
 
+        let voiceItem = NSMenuItem(
+            title: "Voice + System Audio",
+            action: #selector(toggleVoicePlusSystem(_:)),
+            keyEquivalent: "v"
+        )
+        voiceItem.keyEquivalentModifierMask = [.command, .option]
+        voiceItem.target = self
+        voiceItem.state  = voicePlusSystemActive ? .on : .off
+        profilesMenu.addItem(voiceItem)
+
         let monitorItem = NSMenuItem(
             title: "Monitor + Record",
             action: #selector(toggleMonitorRecord(_:)),
@@ -240,6 +407,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         midiItem.target = self
         menu.addItem(midiItem)
 
+        let installItem = NSMenuItem(title: "Install Driver…", action: #selector(openInstaller), keyEquivalent: "")
+        installItem.target = self
+        menu.addItem(installItem)
+
         let aboutItem = NSMenuItem(title: "About AudioBridge", action: #selector(showAbout), keyEquivalent: "")
         aboutItem.target = self
         menu.addItem(aboutItem)
@@ -255,35 +426,77 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
 
     @objc func toggleDriver(_ sender: NSMenuItem) {
-        driverEnabled.toggle()
-        sender.state = driverEnabled ? .on : .off
-        if !driverEnabled {
+        // Detection-only toggle. Disabling means uninstalling the driver,
+        // which we surface as guidance rather than performing automatically.
+        if driverEnabled {
             let alert = NSAlert()
-            alert.messageText    = "AudioBridge"
-            alert.informativeText = "To fully disable AudioBridge, uninstall the driver and restart your Mac. The toggle reflects current detection state."
+            alert.messageText     = "Disable AudioBridge"
+            alert.informativeText = "To disable AudioBridge, remove /Library/Audio/Plug-Ins/HAL/AudioBridge.driver and restart your Mac."
             alert.runModal()
+        } else {
+            openInstaller()
         }
     }
 
     @objc func applyProfile(_ sender: NSMenuItem) {
         guard let deviceHint = sender.representedObject as? String else { return }
         guard isAudioBridgeLoaded() else {
-            let alert = NSAlert()
-            alert.messageText     = "AudioBridge not detected"
-            alert.informativeText = "Install the AudioBridge driver and restart your Mac before using profiles."
-            alert.runModal()
+            showDriverMissingAlert()
             return
         }
-        setDefaultInput(deviceName: deviceHint)
-        let alert = NSAlert()
-        alert.messageText     = "\(sender.title) activated"
-        alert.informativeText = "Default input set to \(deviceHint)."
-        alert.runModal()
+        setDefaultInputByName(deviceHint)
+        postNotification(title: "AudioBridge", body: "\(sender.title): default input set to \(deviceHint)")
+    }
+
+    @objc func toggleVoicePlusSystem(_ sender: NSMenuItem) {
+        if voicePlusSystemActive {
+            if let originalID = originalDefaultInputID {
+                setDefaultInput(deviceID: originalID)
+            }
+            if let aggregateID = voicePlusSystemAggregateID {
+                destroyAggregateDevice(deviceID: aggregateID)
+            }
+            voicePlusSystemActive       = false
+            voicePlusSystemAggregateID  = nil
+            originalDefaultInputID      = nil
+            sender.state = .off
+            postNotification(title: "AudioBridge", body: "Voice + System Audio off")
+            return
+        }
+
+        guard isAudioBridgeLoaded() else {
+            showDriverMissingAlert()
+            return
+        }
+        guard let micID = getDefaultInputDeviceID() else {
+            showError("No default microphone found. Connect a microphone or set one as the default input first.")
+            return
+        }
+        // If the current default input is already the AudioBridge driver, the
+        // aggregate would just be AudioBridge twice — abort and tell the user.
+        if isAudioBridgeDevice(deviceID: micID) {
+            showError("The default input is already AudioBridge. Set a real microphone as the default input first (System Settings → Sound → Input).")
+            return
+        }
+        guard let bridgeID = findAudioBridgeDeviceID(channelHint: 2) else {
+            showError("AudioBridge 2ch device not found.")
+            return
+        }
+        guard let aggregateID = createVoicePlusSystemAggregate(micDeviceID: micID, bridgeDeviceID: bridgeID) else {
+            showError("Could not create the Voice + System Audio device. Check Audio MIDI Setup.")
+            return
+        }
+
+        originalDefaultInputID     = micID
+        voicePlusSystemAggregateID = aggregateID
+        setDefaultInput(deviceID: aggregateID)
+        voicePlusSystemActive = true
+        sender.state = .on
+        postNotification(title: "AudioBridge", body: "Voice + System Audio active — select it as input in your DAW")
     }
 
     @objc func toggleMonitorRecord(_ sender: NSMenuItem) {
         if monitorRecordActive {
-            // Tear down: restore original output and destroy aggregate
             if let originalID = originalDefaultOutputID {
                 setDefaultOutput(deviceID: originalID)
             }
@@ -294,69 +507,94 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             monitorRecordAggregateID  = nil
             originalDefaultOutputID   = nil
             sender.state = .off
-        } else {
-            // Guard: AudioBridge must be loaded
-            guard isAudioBridgeLoaded() else {
-                let alert = NSAlert()
-                alert.messageText     = "AudioBridge not detected"
-                alert.informativeText = "Install the AudioBridge driver and restart your Mac before using profiles."
-                alert.runModal()
-                return
-            }
-            // Find current default output and AudioBridge output device
-            guard let currentOutputID = getDefaultOutputDeviceID() else {
-                let alert = NSAlert()
-                alert.messageText     = "Setup failed"
-                alert.informativeText = "Could not determine the current default output device."
-                alert.runModal()
-                return
-            }
-            guard let bridgeDeviceID = findAudioBridgeOutputDeviceID() else {
-                let alert = NSAlert()
-                alert.messageText     = "Setup failed"
-                alert.informativeText = "Could not find an AudioBridge output device."
-                alert.runModal()
-                return
-            }
-            // Create the Multi-Output aggregate and set as system default
-            guard let aggregateID = createMonitorRecordAggregate(
-                masterDeviceID: currentOutputID,
-                bridgeDeviceID: bridgeDeviceID
-            ) else {
-                let alert = NSAlert()
-                alert.messageText     = "Setup failed"
-                alert.informativeText = "Could not create the Monitor + Record device. Check Audio MIDI Setup."
-                alert.runModal()
-                return
-            }
-            originalDefaultOutputID  = currentOutputID
-            monitorRecordAggregateID = aggregateID
-            setDefaultOutput(deviceID: aggregateID)
-            monitorRecordActive = true
-            sender.state = .on
-            postNotification(title: "AudioBridge", body: "Monitor + Record active")
+            postNotification(title: "AudioBridge", body: "Monitor + Record off")
+            return
         }
+
+        guard isAudioBridgeLoaded() else {
+            showDriverMissingAlert()
+            return
+        }
+        guard let currentOutputID = getDefaultOutputDeviceID() else {
+            showError("Could not determine the current default output device.")
+            return
+        }
+        guard let bridgeDeviceID = findAudioBridgeOutputDeviceID() else {
+            showError("Could not find an AudioBridge output device.")
+            return
+        }
+        guard let aggregateID = createMonitorRecordAggregate(
+            masterDeviceID: currentOutputID,
+            bridgeDeviceID: bridgeDeviceID
+        ) else {
+            showError("Could not create the Monitor + Record device. Check Audio MIDI Setup.")
+            return
+        }
+        originalDefaultOutputID  = currentOutputID
+        monitorRecordAggregateID = aggregateID
+        setDefaultOutput(deviceID: aggregateID)
+        monitorRecordActive = true
+        sender.state = .on
+        postNotification(title: "AudioBridge", body: "Monitor + Record active")
     }
 
     @objc func openAudioMIDISetup() {
         NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Utilities/Audio MIDI Setup.app"))
     }
 
+    @objc func openInstaller() {
+        // Look for the bundled installer pkg next to the app, then in common dist locations.
+        let candidates: [URL] = [
+            Bundle.main.url(forResource: "AudioBridge-Driver-2.2.0-signed", withExtension: "pkg"),
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("dist/AudioBridge-Driver-2.2.0-signed.pkg"),
+        ].compactMap { $0 }
+        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText     = "Driver installer not found"
+        alert.informativeText = "Download AudioBridge-Driver-2.2.0-signed.pkg from the project release and double-click to install."
+        alert.runModal()
+    }
+
     @objc func showAbout() {
         let alert = NSAlert()
         alert.messageText     = "AudioBridge"
         alert.informativeText = """
-        Version 2.1.0
+        Version 2.2.0
         Virtual audio routing for macOS.
 
-        Based on BlackHole by Existential Audio Inc.
-        GPL-3.0 licensed.
+        Driver bundle ID: \(kAudioBridgeBundleID)
+        Driver location:  /Library/Audio/Plug-Ins/HAL/AudioBridge.driver
+
+        Based on BlackHole by Existential Audio Inc. (GPL-3.0)
         """
         alert.runModal()
     }
 
     @objc func quitApp() {
         NSApplication.shared.terminate(nil)
+    }
+
+    // MARK: - Alerts
+
+    func showDriverMissingAlert() {
+        let alert = NSAlert()
+        alert.messageText     = "AudioBridge driver not detected"
+        alert.informativeText = "Install AudioBridge-Driver-2.2.0-signed.pkg and restart your Mac before using profiles."
+        alert.addButton(withTitle: "Open Installer…")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            openInstaller()
+        }
+    }
+
+    func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText     = "AudioBridge"
+        alert.informativeText = message
+        alert.runModal()
     }
 }
 
