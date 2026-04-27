@@ -1,5 +1,6 @@
 import Cocoa
 import CoreAudio
+import AudioToolbox
 import UserNotifications
 
 // MARK: - Driver constants
@@ -222,6 +223,236 @@ func postNotification(title: String, body: String) {
     UNUserNotificationCenter.current().add(request)
 }
 
+// MARK: - Recorder
+
+// Records audio from a specific CoreAudio input device into a .m4a (AAC) file.
+//
+// Uses AUHAL (kAudioUnitSubType_HALOutput configured as input) bound directly
+// to a chosen AudioDeviceID, with ExtAudioFile handling the AAC encode. This
+// records from AudioBridge regardless of the system default input, so the
+// user's mic is never disturbed.
+final class Recorder {
+    private var audioUnit: AudioUnit?
+    private var extFile: ExtAudioFileRef?
+    private var clientFormat = AudioStreamBasicDescription()
+    private var renderBuffer: UnsafeMutableRawPointer?
+    private var renderBufferBytes: Int = 0
+    private(set) var url: URL?
+    private(set) var startedAt: Date?
+
+    var isRecording: Bool { audioUnit != nil }
+
+    static var recordingsDirectory: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent("Music/AudioBridge", isDirectory: true)
+    }
+
+    static func makeRecordingURL(date: Date = Date()) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale     = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone   = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let name = "AudioBridge_\(formatter.string(from: date)).m4a"
+        return recordingsDirectory.appendingPathComponent(name)
+    }
+
+    private static let inputCallback: AURenderCallback = { (
+        inRefCon, ioActionFlags, inTimeStamp, inBusNumber, inNumberFrames, _
+    ) -> OSStatus in
+        let recorder = Unmanaged<Recorder>.fromOpaque(inRefCon).takeUnretainedValue()
+        return recorder.captureFrames(
+            actionFlags: ioActionFlags,
+            timeStamp: inTimeStamp,
+            busNumber: inBusNumber,
+            numberFrames: inNumberFrames
+        )
+    }
+
+    func start(deviceID: AudioDeviceID) throws -> URL {
+        var desc = AudioComponentDescription(
+            componentType:         kAudioUnitType_Output,
+            componentSubType:      kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags:        0,
+            componentFlagsMask:    0
+        )
+        guard let comp = AudioComponentFindNext(nil, &desc) else {
+            throw rerr(-1, "AUHAL component not available.")
+        }
+        var au: AudioUnit?
+        try check(AudioComponentInstanceNew(comp, &au), "AudioComponentInstanceNew")
+        guard let unit = au else { throw rerr(-1, "AudioUnit allocation failed.") }
+
+        var enableInput: UInt32  = 1
+        var disableOutput: UInt32 = 0
+        try check(AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
+            &enableInput, UInt32(MemoryLayout.size(ofValue: enableInput))
+        ), "EnableIO input")
+        try check(AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+            &disableOutput, UInt32(MemoryLayout.size(ofValue: disableOutput))
+        ), "DisableIO output")
+
+        var dev = deviceID
+        try check(AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &dev, UInt32(MemoryLayout<AudioDeviceID>.size)
+        ), "CurrentDevice")
+
+        var deviceFormat = AudioStreamBasicDescription()
+        var fmtSize = UInt32(MemoryLayout.size(ofValue: deviceFormat))
+        try check(AudioUnitGetProperty(
+            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1,
+            &deviceFormat, &fmtSize
+        ), "Get device StreamFormat")
+
+        let channels   = max(deviceFormat.mChannelsPerFrame, 1)
+        let sampleRate = deviceFormat.mSampleRate > 0 ? deviceFormat.mSampleRate : 48_000
+        var client     = AudioStreamBasicDescription()
+        client.mSampleRate       = sampleRate
+        client.mFormatID         = kAudioFormatLinearPCM
+        client.mFormatFlags      = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        client.mChannelsPerFrame = channels
+        client.mBitsPerChannel   = 32
+        client.mFramesPerPacket  = 1
+        client.mBytesPerFrame    = 4 * channels
+        client.mBytesPerPacket   = 4 * channels
+
+        try check(AudioUnitSetProperty(
+            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+            &client, UInt32(MemoryLayout.size(ofValue: client))
+        ), "Set client StreamFormat")
+
+        let outURL = Recorder.makeRecordingURL()
+        try FileManager.default.createDirectory(
+            at: outURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        FileManager.default.createFile(atPath: outURL.path, contents: nil)
+        try? FileManager.default.removeItem(at: outURL)
+
+        var fileFormat = AudioStreamBasicDescription()
+        fileFormat.mSampleRate       = sampleRate
+        fileFormat.mFormatID         = kAudioFormatMPEG4AAC
+        fileFormat.mChannelsPerFrame = channels
+        fileFormat.mFramesPerPacket  = 1024
+
+        var extRef: ExtAudioFileRef?
+        try check(ExtAudioFileCreateWithURL(
+            outURL as CFURL,
+            kAudioFileM4AType,
+            &fileFormat,
+            nil,
+            AudioFileFlags.eraseFile.rawValue,
+            &extRef
+        ), "ExtAudioFileCreateWithURL")
+        guard let ext = extRef else { throw rerr(-1, "ExtAudioFile not created.") }
+
+        try check(ExtAudioFileSetProperty(
+            ext, kExtAudioFileProperty_ClientDataFormat,
+            UInt32(MemoryLayout.size(ofValue: client)), &client
+        ), "Set ClientDataFormat")
+
+        // Prime the encoder on a non-realtime thread before any render callback
+        // tries to write — ExtAudioFileWriteAsync(0, nil) is the documented
+        // priming idiom, and it must happen off the audio thread.
+        try check(ExtAudioFileWriteAsync(ext, 0, nil), "Prime ExtAudioFile")
+
+        var callback = AURenderCallbackStruct(
+            inputProc: Recorder.inputCallback,
+            inputProcRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        try check(AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+            &callback, UInt32(MemoryLayout.size(ofValue: callback))
+        ), "SetInputCallback")
+
+        // Pre-allocate a render buffer big enough for any reasonable AUHAL slice.
+        // 16384 frames * 8 bytes/frame (stereo float32) ≈ 128 KB; resized on
+        // demand if the audio unit asks for more.
+        renderBufferBytes = 16_384 * Int(client.mBytesPerFrame)
+        renderBuffer = UnsafeMutableRawPointer.allocate(
+            byteCount: renderBufferBytes, alignment: 16
+        )
+
+        try check(AudioUnitInitialize(unit), "AudioUnitInitialize")
+        try check(AudioOutputUnitStart(unit), "AudioOutputUnitStart")
+
+        self.audioUnit    = unit
+        self.extFile      = ext
+        self.clientFormat = client
+        self.url          = outURL
+        self.startedAt    = Date()
+        return outURL
+    }
+
+    @discardableResult
+    func stop() -> URL? {
+        guard let unit = audioUnit else { return nil }
+        AudioOutputUnitStop(unit)
+        AudioUnitUninitialize(unit)
+        AudioComponentInstanceDispose(unit)
+        if let ext = extFile {
+            ExtAudioFileDispose(ext)
+        }
+        if let buf = renderBuffer {
+            buf.deallocate()
+        }
+        let saved = url
+        audioUnit = nil
+        extFile = nil
+        renderBuffer = nil
+        renderBufferBytes = 0
+        url = nil
+        startedAt = nil
+        return saved
+    }
+
+    fileprivate func captureFrames(
+        actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+        timeStamp: UnsafePointer<AudioTimeStamp>,
+        busNumber: UInt32,
+        numberFrames: UInt32
+    ) -> OSStatus {
+        guard let unit = audioUnit, let ext = extFile, var buffer = renderBuffer else {
+            return noErr
+        }
+        let bytesNeeded = Int(numberFrames) * Int(clientFormat.mBytesPerFrame)
+        if bytesNeeded > renderBufferBytes {
+            // Grow the buffer if AUHAL ever asks for a bigger slice than we sized for.
+            buffer.deallocate()
+            renderBufferBytes = bytesNeeded
+            buffer = UnsafeMutableRawPointer.allocate(byteCount: bytesNeeded, alignment: 16)
+            renderBuffer = buffer
+        }
+        var bufList = AudioBufferList(
+            mNumberBuffers: 1,
+            mBuffers: AudioBuffer(
+                mNumberChannels: clientFormat.mChannelsPerFrame,
+                mDataByteSize:   UInt32(bytesNeeded),
+                mData:           buffer
+            )
+        )
+        let renderStatus = AudioUnitRender(
+            unit, actionFlags, timeStamp, busNumber, numberFrames, &bufList
+        )
+        if renderStatus != noErr { return renderStatus }
+        return ExtAudioFileWriteAsync(ext, numberFrames, &bufList)
+    }
+
+    private func check(_ status: OSStatus, _ what: String) throws {
+        if status != noErr {
+            throw rerr(Int(status), "\(what) failed (OSStatus \(status)).")
+        }
+    }
+
+    private func rerr(_ code: Int, _ msg: String) -> NSError {
+        NSError(domain: "AudioBridge.Recorder", code: code,
+                userInfo: [NSLocalizedDescriptionKey: msg])
+    }
+}
+
 // MARK: - Menu bar icon
 
 // Stepped square spiral, monochrome template — same shape as the
@@ -279,6 +510,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var voicePlusSystemAggregateID: AudioDeviceID? = nil
     var originalDefaultInputID:    AudioDeviceID? = nil
 
+    // Recording state
+    let recorder = Recorder()
+    var recordMenuItem: NSMenuItem?
+    var recordingTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         driverEnabled = isAudioBridgeLoaded()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in }
@@ -303,6 +539,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if recorder.isRecording {
+            _ = recorder.stop()
+        }
         if monitorRecordActive, let aggregateID = monitorRecordAggregateID {
             if let originalID = originalDefaultOutputID {
                 setDefaultOutput(deviceID: originalID)
@@ -390,6 +629,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         profilesItem.submenu = profilesMenu
         menu.addItem(profilesItem)
+        menu.addItem(.separator())
+
+        let recItem = NSMenuItem(title: recordMenuTitle(), action: #selector(toggleRecording(_:)), keyEquivalent: "r")
+        recItem.keyEquivalentModifierMask = [.command, .shift]
+        recItem.target = self
+        recItem.isEnabled = driverEnabled || recorder.isRecording
+        if recorder.isRecording {
+            recItem.image = NSImage(systemSymbolName: "record.circle.fill",
+                                    accessibilityDescription: "Recording")
+        } else {
+            recItem.image = NSImage(systemSymbolName: "record.circle",
+                                    accessibilityDescription: "Record")
+        }
+        menu.addItem(recItem)
+        recordMenuItem = recItem
+
+        let recordingsItem = NSMenuItem(title: "Recordings…", action: #selector(openRecordingsFolder), keyEquivalent: "")
+        recordingsItem.target = self
+        menu.addItem(recordingsItem)
         menu.addItem(.separator())
 
         let midiItem = NSMenuItem(title: "Open Audio MIDI Setup", action: #selector(openAudioMIDISetup), keyEquivalent: "")
@@ -565,6 +823,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func quitApp() {
         NSApplication.shared.terminate(nil)
+    }
+
+    // MARK: - Recording
+
+    func recordMenuTitle() -> String {
+        guard recorder.isRecording, let startedAt = recorder.startedAt else {
+            return "Record"
+        }
+        let elapsed = Int(Date().timeIntervalSince(startedAt))
+        let mins = elapsed / 60
+        let secs = elapsed % 60
+        return String(format: "Stop Recording  •  %d:%02d", mins, secs)
+    }
+
+    @objc func toggleRecording(_ sender: NSMenuItem) {
+        if recorder.isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    func startRecording() {
+        guard isAudioBridgeLoaded() else {
+            showDriverMissingAlert()
+            return
+        }
+        guard let bridgeID = findAudioBridgeDeviceID(channelHint: 2) ?? findAudioBridgeDeviceID() else {
+            showError("AudioBridge input device not found.")
+            return
+        }
+        do {
+            let url = try recorder.start(deviceID: bridgeID)
+            postNotification(title: "AudioBridge", body: "Recording to \(url.lastPathComponent)")
+            recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                self?.recordMenuItem?.title = self?.recordMenuTitle() ?? "Stop Recording"
+            }
+            buildMenu()
+        } catch {
+            showError("Could not start recording: \(error.localizedDescription)")
+        }
+    }
+
+    func stopRecording() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        guard let url = recorder.stop() else {
+            buildMenu()
+            return
+        }
+        buildMenu()
+        let alert = NSAlert()
+        alert.messageText     = "Recording saved"
+        alert.informativeText = url.path
+        alert.addButton(withTitle: "Show in Finder")
+        alert.addButton(withTitle: "Done")
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+        postNotification(title: "AudioBridge", body: "Saved \(url.lastPathComponent)")
+    }
+
+    @objc func openRecordingsFolder() {
+        let dir = Recorder.recordingsDirectory
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
     }
 
     // MARK: - Alerts

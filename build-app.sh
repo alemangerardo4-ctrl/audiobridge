@@ -23,7 +23,7 @@ cd "$HERE"
 DEV_ID="Developer ID Application: GERARDO ALEMAN (D52UXTRNZA)"
 APP="AudioBridge.app"
 BIN="AudioBridgeApp"
-VERSION="2.2.5"
+VERSION="2.3.0"
 
 # Read version from Info.plist if available, falling back to the constant above.
 if PLIST_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AudioBridgeApp/Info.plist 2>/dev/null)"; then
@@ -36,11 +36,11 @@ rm -rf .build/arm64 .build/x86_64
 mkdir -p .build/arm64 .build/x86_64
 
 swiftc -O -target arm64-apple-macos13  -o .build/arm64/$BIN  \
-  -framework Cocoa -framework CoreAudio -framework UserNotifications \
+  -framework Cocoa -framework CoreAudio -framework AudioToolbox -framework UserNotifications \
   AudioBridgeApp/main.swift
 
 swiftc -O -target x86_64-apple-macos13 -o .build/x86_64/$BIN \
-  -framework Cocoa -framework CoreAudio -framework UserNotifications \
+  -framework Cocoa -framework CoreAudio -framework AudioToolbox -framework UserNotifications \
   AudioBridgeApp/main.swift
 
 # 2. Stage the bundle in /tmp (xattr-clean), lipo, sign, verify.

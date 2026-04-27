@@ -11,9 +11,9 @@
     <key>CFBundleDisplayName</key>
     <string>AudioBridge</string>
     <key>CFBundleVersion</key>
-    <string>9</string>
+    <string>10</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.2.5</string>
+    <string>2.3.0</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -24,5 +24,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>AudioBridge needs microphone access to record audio routed through the AudioBridge virtual audio device.</string>
 </dict>
 </plist>
